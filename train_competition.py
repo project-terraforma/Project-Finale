@@ -53,7 +53,7 @@ print("=" * 65)
 
 # ── 1. LOAD ────────────────────────────────────────────────────────────────────
 print("\n[1/6] Loading data …")
-df = pd.read_parquet(args.data)
+df = pd.read_parquet("data/project_c_samples.parquet")
 print(f"    {len(df):,} rows × {df.shape[1]} columns")
 
 # ── Handle both sample file (no eval_type) and full competition file ───────────
@@ -354,10 +354,9 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X_train_static, y_train), 1):
     # ── Build fold feature matrices ───────────────────────────────────────────
     X_tr = X_train_static.iloc[tr_idx].copy()
     X_va = X_train_static.iloc[va_idx].copy()
-    X_tr["cat_closure_rate"] = oof_cat_closure[
-        tr_idx
-    ]  # train fold: use their OOF (zeros for first fold, ok)
-    X_va["cat_closure_rate"] = oof_cat_closure[va_idx]
+    X_tr["cat_closure_rate"] = tr_cats.map(cat_closure_map).fillna(global_mean).values
+    X_va["cat_closure_rate"] = va_cats.map(cat_closure_map).fillna(global_mean).values
+    oof_cat_closure[va_idx] = X_va["cat_closure_rate"].values
 
     # ── External signal feature (train only — per spec) ───────────────────────
     if HAS_EXTERNAL:
