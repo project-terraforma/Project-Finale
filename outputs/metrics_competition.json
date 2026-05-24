@@ -1,7 +1,7 @@
 {
   "n_train": 3425,
   "n_val": 0,
-  "n_features": 31,
+  "n_features": 34,
   "features": [
     "confidence",
     "confidence_bucket",
@@ -33,39 +33,42 @@
     "alt_cat_count",
     "primary_cat_enc",
     "addr_region_enc",
+    "days_since_latest_update",
+    "days_since_oldest_update",
+    "update_span_days",
     "cat_closure_rate"
   ],
   "class_balance_train": {
     "open": 3112,
     "closed": 313
   },
-  "best_threshold": 0.15000000000000002,
-  "oof_mcc": 0.279458918987417,
+  "best_threshold": 0.20000000000000004,
+  "oof_mcc": 0.2839427477567085,
   "mcc_by_threshold": {
-    "0.10": 0.22677114878098847,
-    "0.15": 0.28018830833721753,
-    "0.20": 0.27280849785319533,
-    "0.25": 0.25595624586524374,
-    "0.30": 0.2573461736040737,
-    "0.35": 0.26228989040607553,
-    "0.40": 0.2600687714775641,
-    "0.45": 0.24577427488928452,
-    "0.50": 0.22588809725498563,
-    "0.55": 0.20501788917632702,
-    "0.60": 0.22306783664213187,
-    "0.65": 0.20906460291772927
+    "0.10": 0.2245090759827158,
+    "0.15": 0.2448873030473771,
+    "0.20": 0.2868547438203909,
+    "0.25": 0.26502326189846354,
+    "0.30": 0.26096827240739817,
+    "0.35": 0.25686188147669914,
+    "0.40": 0.2547241632842291,
+    "0.45": 0.23253078679463565,
+    "0.50": 0.21520365465003496,
+    "0.55": 0.21621705215334847,
+    "0.60": 0.20867719993879627,
+    "0.65": 0.21215928141872067
   },
   "top_10_features_by_shap": [
-    "cat_closure_rate",
     "confidence",
+    "cat_closure_rate",
     "name_len",
     "lon",
     "primary_cat_enc",
     "lat",
-    "msft_age_x_conf",
     "meta_conf",
-    "msft_age_days",
-    "addr_completeness"
+    "msft_age_x_conf",
+    "addr_completeness",
+    "msft_age_days"
   ],
   "model_params": {
     "n_estimators": 600,

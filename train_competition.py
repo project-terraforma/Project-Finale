@@ -31,6 +31,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from sklearn.calibration import CalibratedClassifierCV
 
 warnings.filterwarnings("ignore")
 
@@ -105,6 +106,24 @@ def parse_geom(wkb_bytes):
         return None, None
 
 
+def extract_update_times(source_list):
+    if not isinstance(source_list, (list, np.ndarray)):
+        return []
+
+    dates = []
+
+    for s in source_list:
+        dt = s.get("update_time")
+
+        if dt is not None:
+            try:
+                dates.append(pd.to_datetime(dt, utc=True))
+            except Exception:
+                pass
+
+    return dates
+
+
 def engineer_features(frame: pd.DataFrame) -> pd.DataFrame:
     """All feature engineering in one place — call on train and val separately."""
     f = frame.copy()
@@ -151,6 +170,24 @@ def engineer_features(frame: pd.DataFrame) -> pd.DataFrame:
     )
     # Interaction: old MSFT record + low meta confidence = strong closure signal
     f["msft_age_x_conf"] = f["msft_age_days"].clip(lower=0) * (1 - f["confidence"])
+
+    snapshot = pd.Timestamp("2025-02-24", tz="UTC")
+
+    f["all_update_times"] = f["sources"].apply(extract_update_times)
+
+    f["latest_update"] = f["all_update_times"].apply(
+        lambda x: max(x) if len(x) > 0 else pd.NaT
+    )
+
+    f["oldest_update"] = f["all_update_times"].apply(
+        lambda x: min(x) if len(x) > 0 else pd.NaT
+    )
+
+    f["days_since_latest_update"] = (snapshot - f["latest_update"]).dt.days.fillna(9999)
+
+    f["days_since_oldest_update"] = (snapshot - f["oldest_update"]).dt.days.fillna(9999)
+
+    f["update_span_days"] = (f["latest_update"] - f["oldest_update"]).dt.days.fillna(0)
 
     # ── Contact / presence ────────────────────────────────────────────────────
     f["has_phone"] = f["phones"].apply(lambda x: int(safe_len(x) > 0))
@@ -209,6 +246,53 @@ def engineer_features(frame: pd.DataFrame) -> pd.DataFrame:
         )
     )
     f["alt_cat_count"] = f["alt_cats"].apply(len)
+
+    f["missing_websites"] = f["websites"].apply(lambda x: int(safe_len(x) == 0))
+    f["missing_phones"] = f["phones"].apply(lambda x: int(safe_len(x) == 0))
+    f["missing_socials"] = f["socials"].apply(lambda x: int(safe_len(x) == 0))
+    f["missing_addresses"] = f["addresses"].apply(lambda x: int(safe_len(x) == 0))
+    f["missing_categories"] = f["categories"].isna().astype(int)
+
+    # Total metadata completeness
+    f["missing_count"] = (
+        f["missing_websites"]
+        + f["missing_phones"]
+        + f["missing_socials"]
+        + f["missing_addresses"]
+        + f["missing_categories"]
+    )
+
+    # f["source_dataset_count"] = f["sources"].apply(
+    #     lambda x: (
+    #         len(set(s["dataset"] for s in x))
+    #         if isinstance(x, (list, np.ndarray))
+    #         else 0
+    #     )
+    # )
+
+    # f["has_many_sources"] = (f["source_count"] >= 3).astype(int)
+
+    # stale + missing presence
+    f["stale_no_website"] = (
+        (f["days_since_latest_update"] > 365) & (f["has_website"] == 0)
+    ).astype(int)
+
+    # low confidence + no phone
+    f["low_conf_no_phone"] = ((f["confidence"] < 0.7) & (f["has_phone"] == 0)).astype(
+        int
+    )
+
+    # weak metadata + stale
+    f["weak_presence_old"] = (
+        (f["presence_score"] <= 1) & (f["days_since_latest_update"] > 365)
+    ).astype(int)
+
+    f["lat_round"] = f["lat"].round(1)
+    f["lon_round"] = f["lon"].round(1)
+
+    density = f.groupby(["lat_round", "lon_round"]).size().rename("geo_density")
+
+    f = f.merge(density, on=["lat_round", "lon_round"], how="left")
 
     return f
 
@@ -279,6 +363,21 @@ STATIC_FEATURES = [
     "alt_cat_count",
     "primary_cat_enc",
     "addr_region_enc",
+    # "missing_websites",
+    # "missing_phones",
+    # "missing_socials",
+    # "missing_addresses",
+    # "missing_categories",
+    # "missing_count",
+    "days_since_latest_update",
+    "days_since_oldest_update",
+    "update_span_days",
+    # "source_dataset_count",
+    # "has_many_sources",
+    # "stale_no_website",
+    # "low_conf_no_phone",
+    # "weak_presence_old",
+    # "geo_density",
 ]
 
 # Will add OOF target-encoded cat_closure_rate in step 4
@@ -374,15 +473,18 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X_train_static, y_train), 1):
         X_va["external_signal"] = ext_va
 
     # ── Train ─────────────────────────────────────────────────────────────────
-    model = xgb.XGBClassifier(**MODEL_PARAMS)
-    model.fit(
+    base_model = xgb.XGBClassifier(**MODEL_PARAMS)
+
+    base_model.fit(
         X_tr,
         y_train[tr_idx],
         eval_set=[(X_va, y_train[va_idx])],
         verbose=False,
     )
 
-    probs = model.predict_proba(X_va)[:, 1]
+    # ── Probability calibration ─────────────────────────────
+
+    probs = base_model.predict_proba(X_va)[:, 1]
     oof_probs[va_idx] = probs
 
     # MCC across thresholds
@@ -397,7 +499,7 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X_train_static, y_train), 1):
         if HAS_EXTERNAL:
             # External signal not available for val — use 0.5 (neutral)
             X_val_fold["external_signal"] = 0.5
-        val_probs += model.predict_proba(X_val_fold)[:, 1] / args.n_folds
+        val_probs += calibrated_model.predict_proba(X_val_fold)[:, 1] / args.n_folds
 
     fold_best = max(fold_mcc_by_threshold, key=lambda t: fold_mcc_by_threshold[t][-1])
     print(
@@ -457,9 +559,14 @@ if HAS_EXTERNAL:
 ALL_FEATURES = list(X_final.columns)
 print(f"    Total features: {len(ALL_FEATURES)}")
 
-final_model = xgb.XGBClassifier(**MODEL_PARAMS)
-final_model.fit(X_final, y_train, verbose=False)
-final_model.save_model(str(OUT / "competition_model.json"))
+base_final_model = xgb.XGBClassifier(**MODEL_PARAMS)
+
+base_final_model.fit(X_final, y_train, verbose=False)
+
+final_model = CalibratedClassifierCV(base_final_model, method="isotonic", cv=5)
+
+final_model.fit(X_final, y_train)
+base_final_model.save_model(str(OUT / "competition_model.json"))
 print(f"    Model saved → {OUT}/competition_model.json")
 
 # ── Submission CSV ─────────────────────────────────────────────────────────────
@@ -515,7 +622,7 @@ plt.close()
 print(f"    Saved → {OUT}/mcc_threshold_curve.png")
 
 # Plot B — SHAP feature importance
-explainer = shap.TreeExplainer(final_model)
+explainer = shap.TreeExplainer(base_final_model)
 shap_vals = explainer.shap_values(X_final)
 mean_shap = pd.Series(np.abs(shap_vals).mean(axis=0), index=ALL_FEATURES).sort_values(
     ascending=True
