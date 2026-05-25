@@ -54,7 +54,40 @@ print("=" * 65)
 
 # ── 1. LOAD ────────────────────────────────────────────────────────────────────
 print("\n[1/6] Loading data …")
-df = pd.read_parquet("data/project_c_samples.parquet")
+base_df = pd.read_parquet("data/project_c_samples.parquet")
+
+# unify key
+if "id" in base_df.columns and "record_id" not in base_df.columns:
+    base_df = base_df.rename(columns={"id": "record_id"})
+if "_id" in base_df.columns and "record_id" not in base_df.columns:
+    base_df = base_df.rename(columns={"_id": "record_id"})
+
+base_df.head(1).to_dict()
+ext_df = pd.read_parquet("outputs/enrichment_combined.parquet")
+
+ext_df = pd.read_parquet("outputs/enrichment_combined.parquet")
+
+if "id" in ext_df.columns:
+    ext_df = ext_df.rename(columns={"id": "record_id"})
+if "_id" in ext_df.columns:
+    ext_df = ext_df.rename(columns={"_id": "record_id"})
+
+print("BASE COLUMNS:")
+print(base_df.columns)
+
+print("\nENRICHMENT COLUMNS:")
+print(ext_df.columns)
+
+print("\nENRICHMENT INDEX NAME:")
+print(ext_df.index.name)
+
+df = base_df.merge(ext_df, on="record_id", how="left")
+
+
+print(f"    Base rows: {len(base_df):,}")
+print(f"    Enriched rows: {len(df):,}")
+print(f"    External columns added: {ext_df.shape[1]}")
+
 print(f"    {len(df):,} rows × {df.shape[1]} columns")
 
 # ── Handle both sample file (no eval_type) and full competition file ───────────
@@ -84,6 +117,16 @@ else:
     )
 
 print(f"    Train class balance: {train_df['open_int'].value_counts().to_dict()}")
+
+# df["oc_matched"] = df["oc_matched"].fillna(0)
+# df["oc_is_dissolved"] = df["oc_is_dissolved"].fillna(0)
+# df["oc_is_active"] = df["oc_is_active"].fillna(0)
+# df["any_external_closed"] = df["any_external_closed"].fillna(0)
+
+# google_cols = [c for c in df.columns if c.startswith("google_")]
+
+# for c in google_cols:
+#     df[c] = df[c].fillna(-1)
 
 
 # ── 2. FEATURE ENGINEERING ─────────────────────────────────────────────────────
@@ -378,6 +421,23 @@ STATIC_FEATURES = [
     # "low_conf_no_phone",
     # "weak_presence_old",
     # "geo_density",
+    # "oc_matched",
+    # "oc_status",
+    # "oc_name_score",
+    # "oc_company_age_days",
+    # "oc_is_dissolved",
+    # "oc_is_active",
+    # "oc_dissolved_low_conf",
+    "google_closed_high_conf_conflict",
+    # "any_external_closed",
+    "google_matched",
+    "google_name_score",
+    "google_is_permanently_closed",
+    "google_is_operational",
+    "google_rating",
+    "google_rating_count",
+    "google_has_hours",
+    "google_has_moved",
 ]
 
 # Will add OOF target-encoded cat_closure_rate in step 4
@@ -388,7 +448,23 @@ print(f"    Base features: {len(STATIC_FEATURES)}")
 print("\n[4/6] Cross-validation (MCC) …")
 
 y_train = train_df["open_int"].values
-X_train_static = train_df[STATIC_FEATURES].astype(float)
+bad_cols = []
+
+for c in STATIC_FEATURES:
+    if train_df[c].dtype == "object":
+        bad_cols.append(c)
+
+print("Object (non-numeric) columns:")
+print(bad_cols)
+
+X_train_static = train_df[STATIC_FEATURES].copy()
+
+# convert safely
+for c in X_train_static.columns:
+    X_train_static[c] = pd.to_numeric(X_train_static[c], errors="coerce")
+
+# fill remaining NaNs (VERY important for XGBoost)
+X_train_static = X_train_static.fillna(-1)
 
 neg = (y_train == 0).sum()
 pos = (y_train == 1).sum()
@@ -499,7 +575,7 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X_train_static, y_train), 1):
         if HAS_EXTERNAL:
             # External signal not available for val — use 0.5 (neutral)
             X_val_fold["external_signal"] = 0.5
-        val_probs += calibrated_model.predict_proba(X_val_fold)[:, 1] / args.n_folds
+        val_probs += base_model.predict_proba(X_val_fold)[:, 1] / args.n_folds
 
     fold_best = max(fold_mcc_by_threshold, key=lambda t: fold_mcc_by_threshold[t][-1])
     print(
@@ -574,7 +650,7 @@ if not val_df.empty:
     val_preds_bin = (val_probs >= best_threshold).astype(int)
     submission = pd.DataFrame(
         {
-            "record_id": val_df["id"],
+            "record_id": val_df["record_id"],
             "open": ["open" if p == 1 else "closed" for p in val_preds_bin],
         }
     )
